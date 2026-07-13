@@ -33,7 +33,7 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME || 'iris_store',
   waitForConnections: true,
   connectionLimit: 10,
-    charset: 'utf8mb4',
+  charset: 'utf8mb4',
 });
 
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -42,6 +42,17 @@ if (!JWT_SECRET || !ADMIN_PASSWORD_HASH) {
   console.error('Missing JWT_SECRET or ADMIN_PASSWORD_HASH in .env — see .env.example. Refusing to start.');
   process.exit(1);
 }
+
+/* ---------- order status config ---------- */
+// The full set of statuses the admin panel can set. Keeping this on the server
+// (not just the frontend dropdown) means a stray/typo'd status can never be
+// written to the DB via a raw API call.
+const ORDER_STATUSES = ['მოლოდინში', 'დადასტურებული', 'დასრულებული', 'გაუქმებული'];
+// Orders sitting in one of these "final" statuses are eligible for automatic
+// cleanup — they're fully settled (paid & delivered, or cancelled) and there's
+// no operational reason to keep them around indefinitely.
+const FINAL_STATUSES = ['დასრულებული', 'გაუქმებული'];
+const CLEANUP_AFTER_DAYS = 30;
 
 /* ---------- helpers ---------- */
 function requireAdmin(req, res, next) {
@@ -61,6 +72,27 @@ const parseProduct = (row) => ({
   sizes: typeof row.sizes === 'string' ? JSON.parse(row.sizes) : row.sizes,
   colors: typeof row.colors === 'string' ? JSON.parse(row.colors) : row.colors,
 });
+
+// Deletes orders (and their order_items, via ON DELETE CASCADE) that have been
+// sitting in a final status (დასრულებული / გაუქმებული) for more than 30 days,
+// counting from the last time their status changed (updated_at). Safe to call
+// repeatedly — it's just a DELETE with a WHERE clause, nothing to double-run.
+async function cleanupOldOrders() {
+  try {
+    const placeholders = FINAL_STATUSES.map(() => '?').join(',');
+    const [result] = await pool.query(
+      `DELETE FROM orders WHERE status IN (${placeholders}) AND updated_at < (NOW() - INTERVAL ? DAY)`,
+      [...FINAL_STATUSES, CLEANUP_AFTER_DAYS]
+    );
+    if (result.affectedRows > 0) {
+      console.log(`[cleanup] Deleted ${result.affectedRows} order(s) older than ${CLEANUP_AFTER_DAYS} days (${FINAL_STATUSES.join(', ')}).`);
+    }
+    return result.affectedRows;
+  } catch (err) {
+    console.error('[cleanup] Failed to purge old orders:', err.message);
+    return 0;
+  }
+}
 
 /* ================= PUBLIC ================= */
 app.get('/api/products', async (req, res) => {
@@ -207,9 +239,31 @@ app.get('/api/admin/orders', requireAdmin, async (req, res) => {
 app.patch('/api/admin/orders/:id', requireAdmin, async (req, res) => {
   const { status } = req.body || {};
   if (!status) return res.status(400).json({ error: 'სტატუსი აუცილებელია' });
+  if (!ORDER_STATUSES.includes(status)) {
+    return res.status(400).json({ error: 'უცნობი სტატუსი: ' + status });
+  }
+  // updated_at is bumped automatically by the column's ON UPDATE CURRENT_TIMESTAMP —
+  // this is also the timestamp the 30-day cleanup job counts from.
   await pool.query('UPDATE orders SET status=? WHERE id=?', [status, req.params.id]);
   res.json({ ok: true });
 });
+
+// Manual trigger for the cleanup job — handy for testing, or for an admin who
+// doesn't want to wait for the next scheduled run.
+app.post('/api/admin/orders/cleanup', requireAdmin, async (req, res) => {
+  const deleted = await cleanupOldOrders();
+  res.json({ deleted });
+});
+
+/* ================= SCHEDULED CLEANUP ================= */
+// Runs once shortly after startup, then every 24h. Deletes orders that have been
+// დასრულებული (completed) or გაუქმებული (cancelled) for more than 30 days.
+// Using setInterval here (rather than a MySQL EVENT) so this works unmodified on
+// any host — including managed MySQL providers where the event scheduler may be
+// locked down.
+const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
+setTimeout(cleanupOldOrders, 60 * 1000); // small delay after boot
+setInterval(cleanupOldOrders, CLEANUP_INTERVAL_MS);
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`IRIS API running on port ${PORT}`));
