@@ -40,7 +40,10 @@ CREATE TABLE orders (
   payment    VARCHAR(100),
   total      DECIMAL(10,2) NOT NULL,
   status     VARCHAR(30) NOT NULL DEFAULT 'მოლოდინში',
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+  INDEX idx_status_updated (status, updated_at)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 
