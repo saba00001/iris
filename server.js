@@ -33,6 +33,7 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME || 'iris_store',
   waitForConnections: true,
   connectionLimit: 10,
+    charset: 'utf8mb4',
 });
 
 const JWT_SECRET = process.env.JWT_SECRET;
